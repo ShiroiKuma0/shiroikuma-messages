@@ -22,14 +22,26 @@ class MessagesWriter(private val context: Context) {
     private val contentResolver = context.contentResolver
     private val modifiedThreadIds = mutableSetOf<Long>()
 
-    fun writeSmsMessage(smsBackup: SmsBackup) {
+    /**
+     * @return whether the message is in the store afterwards — inserted now, or already there.
+     *
+     * **The result is read back, not taken from `insert`.** "Not the default SMS app" is enforced as
+     * a denied `WRITE_SMS` app-op, and a denied app-op makes the provider **no-op the insert and
+     * still hand back a Uri**. Trusting that return value is how a restore reported 4,259 messages
+     * written into a provider that ended up holding zero rows, under a success reply (白い熊,
+     * 2026-09-08, restoring onto a new phone). One extra indexed query per newly written message is
+     * what it costs to never claim that again.
+     */
+    fun writeSmsMessage(smsBackup: SmsBackup): Boolean {
         val contentValues = smsBackup.toContentValues()
         val threadId = Utils.getOrCreateThreadId(context, smsBackup.address)
         contentValues.put(Sms.THREAD_ID, threadId)
-        if (!smsExist(smsBackup)) {
-            modifiedThreadIds.add(threadId)
-            contentResolver.insert(Sms.CONTENT_URI, contentValues)
+        if (smsExist(smsBackup)) {
+            return true
         }
+        modifiedThreadIds.add(threadId)
+        contentResolver.insert(Sms.CONTENT_URI, contentValues)
+        return smsExist(smsBackup)
     }
 
     private fun smsExist(smsBackup: SmsBackup): Boolean {
@@ -47,24 +59,32 @@ class MessagesWriter(private val context: Context) {
         return exists
     }
 
-    fun writeMmsMessage(mmsBackup: MmsBackup) {
+    /**
+     * @return whether the message is in the store afterwards. The read-back was already here — the
+     * `messageId` this needs before it can write parts and addresses **is** the proof the row landed
+     * — it simply was not reported. See [writeSmsMessage] for why that matters.
+     */
+    fun writeMmsMessage(mmsBackup: MmsBackup): Boolean {
         // 1. write mms msg, get the msg_id, check if mms exists before writing
         // 2. write parts - parts depend on the msg id, check if part exist before writing, write data if it is a non-text part
         // 3. write the addresses, address depends on msg id too, check if address exist before writing
         val contentValues = mmsBackup.toContentValues()
         val threadId = getMmsThreadId(mmsBackup)
-        if (threadId != INVALID_ID) {
-            contentValues.put(Mms.THREAD_ID, threadId)
-            if (!mmsExist(mmsBackup)) {
-                modifiedThreadIds.add(threadId)
-                contentResolver.insert(Mms.CONTENT_URI, contentValues)
-            }
-            val messageId = getMmsId(mmsBackup)
-            if (messageId != INVALID_ID) {
-                mmsBackup.parts.forEach { writeMmsPart(it, messageId) }
-                mmsBackup.addresses.forEach { writeMmsAddress(it, messageId) }
-            }
+        if (threadId == INVALID_ID) {
+            return false
         }
+        contentValues.put(Mms.THREAD_ID, threadId)
+        if (!mmsExist(mmsBackup)) {
+            modifiedThreadIds.add(threadId)
+            contentResolver.insert(Mms.CONTENT_URI, contentValues)
+        }
+        val messageId = getMmsId(mmsBackup)
+        if (messageId == INVALID_ID) {
+            return false
+        }
+        mmsBackup.parts.forEach { writeMmsPart(it, messageId) }
+        mmsBackup.addresses.forEach { writeMmsAddress(it, messageId) }
+        return true
     }
 
     private fun getMmsThreadId(mmsBackup: MmsBackup): Long {

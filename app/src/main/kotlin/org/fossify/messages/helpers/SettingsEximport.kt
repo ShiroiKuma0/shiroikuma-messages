@@ -1,13 +1,17 @@
 package org.fossify.messages.helpers
 
+import android.app.AppOpsManager
+import android.app.role.RoleManager
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Environment
+import android.os.Process
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.Telephony
 import androidx.annotation.StringRes
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.serialization.decodeFromString
@@ -22,6 +26,7 @@ import org.fossify.commons.helpers.FontHelper
 import org.fossify.commons.helpers.IS_SYSTEM_THEME_ENABLED
 import org.fossify.commons.helpers.PRIMARY_COLOR
 import org.fossify.commons.helpers.TEXT_COLOR
+import org.fossify.commons.helpers.isQPlus
 import org.fossify.commons.helpers.isRPlus
 import org.fossify.commons.helpers.isUpsideDownCakePlus
 import org.fossify.messages.R
@@ -270,7 +275,89 @@ object SettingsEximport {
         bytes: ByteArray,
         categories: Set<Category>,
         onProgress: ProgressReporter = { _, _, _, _ -> },
-    ): String = import(context, bytes.inputStream(), categories, onProgress)
+    ): ImportOutcome = import(context, bytes.inputStream(), categories, onProgress)
+
+    /**
+     * What an import actually did.
+     *
+     * [summary] is the per-category "Label: n" text. [refused] names categories that were **in the
+     * archive and could not be applied at all** — today only the messages category, when this app
+     * does not hold the default-SMS-app role.
+     *
+     * It is a separate list rather than a zero in the summary because the two mean opposite things
+     * to whoever reads them: "0" says the archive had nothing worth restoring, and a refusal says
+     * the phone is not ready and the data is still waiting. Reporting the second as the first is
+     * exactly the failure this type was added for.
+     */
+    data class ImportOutcome(val summary: String, val refused: List<String>)
+
+    /** The message store accepted none of the first [REFUSAL_PROBE] writes. Never leaves this file. */
+    private class MessagesRefusedException : Exception()
+
+    /**
+     * Why the message store refused, and what 白い熊 is to do about it.
+     *
+     * **Three cases, because they need three different actions** — and because telling 白い熊 "not
+     * the default SMS app" while the Settings screen in front of them says it *is* the SMS app is
+     * worse than saying nothing (白い熊, 2026-09-08). That is [BLOCKED], and it is a real state: on
+     * their EMUI the role was held (`dumpsys role` → `holders=shiroikuma.messeji`) while the
+     * `WRITE_SMS` app-op sat at `ignore` and `sms_default_application` was `null` — the role was
+     * granted without the side effects that make it mean anything, so re-applying the setting is
+     * the cure rather than setting it for the first time.
+     *
+     * [key] is the stable part a caller may match on; the advice is a resource, so 白い熊 reads it
+     * in Japanese.
+     */
+    enum class WriteRefusal(val key: String, @StringRes val adviceRes: Int) {
+        /** The role is genuinely not held. Set it. */
+        NOT_DEFAULT("ERROR:not-default-sms-app", R.string.sms_refusal_not_default),
+
+        /** Shown as the SMS app, writes still blocked. Re-apply the setting. */
+        BLOCKED("ERROR:sms-write-blocked", R.string.sms_refusal_blocked),
+
+        /** Everything this app can check says it should work, and it did not. */
+        UNKNOWN("ERROR:message-store-refused", R.string.sms_refusal_unknown),
+    }
+
+    /** Which of [WriteRefusal] applies right now — asked only after writes have actually failed. */
+    fun writeRefusal(context: Context): WriteRefusal = when {
+        !canWriteMessages(context) -> WriteRefusal.NOT_DEFAULT
+        !isWriteSmsAllowed(context) -> WriteRefusal.BLOCKED
+        else -> WriteRefusal.UNKNOWN
+    }
+
+    /** The instruction on its own, for the in-app dialog. The reply adds [WriteRefusal.key]. */
+    fun refusalAdvice(context: Context, refusal: WriteRefusal): String =
+        context.getString(refusal.adviceRes, REFUSAL_PROBE)
+
+    /**
+     * Whether the `WRITE_SMS` app-op is allowed for us.
+     *
+     * The op is the thing the provider actually consults, and it is where a half-applied SMS-app
+     * grant shows up: `ignore` means every insert is discarded and answered as if it worked. Asked
+     * by raw op name rather than through `OPSTR_WRITE_SMS`, whose visibility has moved around
+     * between API levels.
+     *
+     * Defaults to **true** when it cannot be determined: an app that cannot read its own app-op has
+     * no business telling 白い熊 their phone is misconfigured.
+     */
+    private fun isWriteSmsAllowed(context: Context): Boolean = runCatching {
+        val ops = context.getSystemService(AppOpsManager::class.java) ?: return@runCatching true
+        @Suppress("DEPRECATION")
+        val mode = ops.checkOpNoThrow(OP_WRITE_SMS, Process.myUid(), context.packageName)
+        mode == AppOpsManager.MODE_ALLOWED
+    }.getOrDefault(true)
+
+    private const val OP_WRITE_SMS = "android:write_sms"
+
+    /**
+     * How many messages may fail to land before the store is judged to be refusing all of them.
+     *
+     * Not 1: a single message can legitimately fail on its own merits — an MMS whose addresses yield
+     * no usable thread id returns false without anything being wrong with the store. Fifty
+     * consecutive failures with nothing written is not that.
+     */
+    private const val REFUSAL_PROBE = 50
 
     /**
      * The same import, reading the archive as a **stream**.
@@ -286,13 +373,22 @@ object SettingsEximport {
         input: InputStream,
         categories: Set<Category>,
         onProgress: ProgressReporter = { _, _, _, _ -> },
-    ): String {
+    ): ImportOutcome {
         val entries = readZip(input)
         val summary = StringBuilder()
+        val refused = mutableListOf<String>()
         categories.forEach { category ->
             val json = entries["${category.id}.json"] ?: return@forEach
+            // The messages category is the one the platform can refuse, and refuse SILENTLY. It is
+            // detected from the writes themselves rather than from any role API: asking the role
+            // first is what refused a restore on a phone that was holding the role all along.
             var count = if (category == Category.MESSAGES) {
-                importMessages(context, String(json), onProgress)
+                try {
+                    importMessages(context, String(json), onProgress)
+                } catch (_: MessagesRefusedException) {
+                    refused.add(context.getString(category.labelRes))
+                    return@forEach
+                }
             } else {
                 importPrefs(context.getSharedPrefs(), String(json), category)
             }
@@ -304,7 +400,37 @@ object SettingsEximport {
             }
             summary.append(context.getString(category.labelRes)).append(": ").append(count)
         }
-        return summary.toString()
+        return ImportOutcome(summary.toString(), refused)
+    }
+
+    /**
+     * Whether this app is *supposed* to be allowed to write the SMS/MMS store.
+     *
+     * **The gate is the default-SMS-app role, not a permission.** `READ_SMS` and `WRITE_SMS` can
+     * both be granted — they were, on the phone where this was found — and every write still be
+     * discarded, because the platform enforces this as an app-op that makes the provider no-op the
+     * insert *without throwing and without a null return*. No permission prompt can grant the role;
+     * 白い熊 assigns it.
+     *
+     * **Ask [RoleManager], not the legacy setting.** Q moved this role there and left
+     * `Settings.Secure.sms_default_application` behind: on 白い熊's EMUI the role is held
+     * (`dumpsys role` → `holders=shiroikuma.messeji`) while that setting is still `null`, so
+     * `Telephony.Sms.getDefaultSmsPackage` answers "not us" about a phone perfectly willing to take
+     * the writes — and a restore was refused over it (2026-09-08). `MainActivity.loadMessages`
+     * already asked the newer question; this now matches it.
+     *
+     * This is **advisory**. It explains a refusal; it does not decide one. The only thing that
+     * decides is whether a row lands — see [importMessages].
+     */
+    fun canWriteMessages(context: Context): Boolean {
+        if (isQPlus()) {
+            val roles = context.getSystemService(RoleManager::class.java)
+            if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_SMS)) {
+                return roles.isRoleHeld(RoleManager.ROLE_SMS)
+            }
+        }
+        @Suppress("DEPRECATION")
+        return Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     }
 
     /** Every exportable prefs key, sliced into its category's typed key→{t,v} JSON object. */
@@ -383,7 +509,19 @@ object SettingsEximport {
             // unwind a row later. The check after the read is the one that decides.
             onProgress = { done, total ->
                 throwIfCancelled(isCancelled)
-                onProgress(done.toLong(), total.toLong(), unit, "$unit $done/$total")
+                if (done == MessagesReader.COUNTING) {
+                    // Still counting. Both counts go out as UNKNOWN so that nothing downstream can
+                    // compose a fraction out of a denominator that is still moving; the number the
+                    // reader does know travels in the words instead.
+                    onProgress(
+                        AutomationProgress.UNKNOWN,
+                        AutomationProgress.UNKNOWN,
+                        unit,
+                        context.getString(R.string.state_progress_counting, total, unit),
+                    )
+                } else {
+                    onProgress(done.toLong(), total.toLong(), unit, "$unit $done/$total")
+                }
             },
         ) { messages = it }
         throwIfCancelled(isCancelled)
@@ -413,12 +551,24 @@ object SettingsEximport {
         val total = messages.size.toLong()
         var count = 0
         messages.forEachIndexed { index, message ->
-            runCatching {
+            // Only a message the store confirms afterwards is counted. The writers read the row back
+            // for us; counting the *attempt*, as this did until 2026-09-08, is what let a restore
+            // announce 4,259 messages into an empty provider.
+            val written = runCatching {
                 when (message) {
                     is SmsBackup -> writer.writeSmsMessage(message)
                     is MmsBackup -> writer.writeMmsMessage(message)
                 }
+            }.getOrDefault(false)
+            if (written) {
                 count++
+            }
+            // Not one of the first [REFUSAL_PROBE] has landed: the store is taking nothing from us,
+            // and grinding through thousands more round trips would only prove it more slowly. This
+            // is the ONLY test that decides — a role API can disagree with the provider in either
+            // direction, and on 白い熊's phone it did.
+            if (count == 0 && index + 1 >= REFUSAL_PROBE) {
+                throw MessagesRefusedException()
             }
             val done = (index + 1).toLong()
             onProgress(done, total, unit, "$unit $done/$total")

@@ -124,6 +124,12 @@
     <string name="eim_cat_conversations_short">会話</string>
     <string name="eim_cat_blocked_short">キーワード</string>
     <string name="state_progress_unit_category">区分</string>
+    <string name="state_progress_unit_archive">書庫</string>
+    <string name="state_progress_starting">開始しています…</string>
+    <string name="state_progress_counting">%2$sを数えています… %1$d件</string>
+    <string name="sms_refusal_not_default">メッセージは復元されませんでした。\n\n白い熊 メッセージが既定のSMSアプリではありません。Android は既定のSMSアプリにしかメッセージ保存領域への書き込みを許可しません。\n\n対処：設定 → アプリ → 既定のアプリ → SMSアプリ → 白い熊 メッセージ。そのうえで、もう一度復元してください。\n\n失われたものはありません。メッセージはバックアップの中にあります。</string>
+    <string name="sms_refusal_blocked">メッセージは復元されませんでした。\n\n白い熊 メッセージは既にSMSアプリとして表示されていますが、Android は書き込みをすべて拒否しています。設定は記録されたものの、それに伴う権限が付与されておらず、まだ実効性がありません。\n\n対処：設定 → アプリ → 既定のアプリ → SMSアプリ。いったん別のアプリを選び、そのあと改めて 白い熊 メッセージ を選び直してください（選び直すことで権限が付与されます）。そのうえで、もう一度復元してください。\n\n失われたものはありません。メッセージはバックアップの中にあります。</string>
+    <string name="sms_refusal_unknown">メッセージは復元されませんでした。\n\n白い熊 メッセージは既定のSMSアプリで、書き込みも許可されているにもかかわらず、最初の %1$d 件が1件も受け付けられませんでした。\n\n対処：端末を再起動して、もう一度復元してください。再発する場合は調査が必要です。\n\n失われたものはありません。メッセージはバックアップの中にあります。</string>
     <!-- 白い熊 メッセージ UI ページ：自動化（書き出し／読み込みの中） -->
     <string name="automation">自動化</string>
     <string name="enable_automation">自動化エクスポート</string>

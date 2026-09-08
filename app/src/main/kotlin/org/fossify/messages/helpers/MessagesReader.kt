@@ -35,9 +35,12 @@ class MessagesReader(private val context: Context) {
         var smsMessages = listOf<SmsBackup>()
         var mmsMessages = listOf<MmsBackup>()
 
-        // report the growing total while counting, so the caller's progress moves immediately
+        // Report the growing subtotal while counting, so the caller's progress moves immediately —
+        // but as [COUNTING], never as 0. A numerator pinned at zero against a climbing denominator
+        // renders as "0/1443", which reads as an export stuck on its first message rather than one
+        // still working out how many there are (白い熊, 2026-09-08).
         val total = countMessages(getSms, getMms, conversationIds) { counted ->
-            onProgress(0, counted)
+            onProgress(COUNTING, counted)
         }
         var done = 0
         val step = {
@@ -328,5 +331,16 @@ class MessagesReader(private val context: Context) {
             addresses.add(MmsAddress(address, type, charset))
         }
         return addresses
+    }
+
+    companion object {
+        /**
+         * The `done` value while the corpus is still being counted.
+         *
+         * There is no numerator during that phase — the denominator is what is being discovered —
+         * so this says "not a count" rather than picking a number that happens to be small. Every
+         * consumer renders it as words; none of them may format it into a fraction.
+         */
+        const val COUNTING = -1
     }
 }

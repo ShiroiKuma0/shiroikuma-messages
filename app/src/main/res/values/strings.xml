@@ -40,6 +40,12 @@
     <string name="eim_cat_conversations_short">Conversations</string>
     <string name="eim_cat_blocked_short">Keywords</string>
     <string name="state_progress_unit_category">Categories</string>
+    <string name="state_progress_unit_archive">Archive</string>
+    <string name="state_progress_starting">Starting…</string>
+    <string name="state_progress_counting">Counting… %1$d %2$s</string>
+    <string name="sms_refusal_not_default">Your messages were NOT restored.\n\n白い熊 メッセージ is not the default SMS app, and Android only lets the default SMS app write to the message store.\n\nWhat to do: Settings → Apps → Default apps → SMS app → 白い熊 メッセージ. Then run the restore again.\n\nNothing has been lost — the messages are still in the backup.</string>
+    <string name="sms_refusal_blocked">Your messages were NOT restored.\n\n白い熊 メッセージ is already shown as the SMS app, but Android is still refusing every write: the setting was recorded without the permission that goes with it, so it does not yet mean anything.\n\nWhat to do: Settings → Apps → Default apps → SMS app. Pick a DIFFERENT app, then pick 白い熊 メッセージ again — re-applying it is what grants the permission. Then run the restore again.\n\nNothing has been lost — the messages are still in the backup.</string>
+    <string name="sms_refusal_unknown">Your messages were NOT restored.\n\nAndroid accepted none of the first %1$d messages, even though 白い熊 メッセージ is the SMS app and message writing is permitted.\n\nWhat to do: restart the phone and run the restore again. If it happens a second time, this needs looking at.\n\nNothing has been lost — the messages are still in the backup.</string>
     <!-- 白い熊 メッセージ UI page: automation (inside Export / Import) -->
     <string name="automation">Automation</string>
     <string name="enable_automation">Automation export</string>

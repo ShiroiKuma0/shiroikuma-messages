@@ -32,6 +32,20 @@ import org.fossify.messages.R
  * numbers move again. Nothing is invented: a heartbeat repeats the truth rather than fabricating
  * progress, which is what makes it honest to hold a caller's slot with.
  *
+ * ## The beat starts with the job, not with the first count
+ *
+ * That "the core always reports before the first write that could block" is true of the **export**
+ * and was false of the **import**, which is the direction that broke. An import reads the caller's
+ * whole archive, unzips it and parses the corpus before it can count anything, and the heartbeat
+ * used to stay silent until something had been counted — so the longest stretch of the longest
+ * operation was the one stretch with no liveness signal at all. 応用管理 heard nothing whatsoever
+ * from a メッセージ import and failed it as dead after ten minutes (2026-09-08).
+ *
+ * So a [Channel] speaks once the moment it is opened, and keeps beating from there. The opening
+ * line carries [UNKNOWN] rather than a count: `current = -1` is the contract's own liveness value,
+ * which the caller already refuses to let move its high-water mark. Still nothing invented — "I
+ * have started" is a fact, and it is the one fact the caller was missing.
+ *
  * A caller that passed no progress action gets nothing, so every part of this is additive.
  */
 object AutomationProgress {
@@ -43,6 +57,15 @@ object AutomationProgress {
     private const val HEARTBEAT_MS = 20_000L
 
     private const val TAG = "MessejiAutomation"
+
+    /**
+     * The count that means "no count" — a liveness beat rather than a measurement.
+     *
+     * The caller reads it as one: it neither renders a `-1` nor lets it move the high-water mark it
+     * uses to detect a restart. Anything that genuinely cannot be counted yet says this instead of
+     * guessing a number.
+     */
+    const val UNKNOWN = -1L
 
     fun channel(
         context: Context,
@@ -60,6 +83,7 @@ object AutomationProgress {
             jobId = jobId,
             appLabel = appContext.getString(R.string.app_launcher_name),
             unitCategory = appContext.getString(R.string.state_progress_unit_category),
+            openingText = appContext.getString(R.string.state_progress_starting),
         )
     }
 
@@ -79,6 +103,7 @@ object AutomationProgress {
         private val jobId: String?,
         private val appLabel: String,
         private val unitCategory: String,
+        private val openingText: String,
     ) : Closeable {
 
         private class Line(val current: Long, val total: Long, val unit: String, val text: String)
@@ -87,8 +112,10 @@ object AutomationProgress {
         @Volatile
         private var lastSentAt = 0L
 
+        // Opened with the "starting" line already in it, so the heartbeat below has something true
+        // to repeat from its very first tick — see the class comment on why silence here was fatal.
         @Volatile
-        private var lastLine: Line? = null
+        private var lastLine: Line? = Line(UNKNOWN, UNKNOWN, unitCategory, openingText)
 
         private val heartbeat: Timer? = if (progressAction.isEmpty()) {
             null
@@ -101,6 +128,17 @@ object AutomationProgress {
                     HEARTBEAT_MS,
                     HEARTBEAT_MS,
                 )
+            }
+        }
+
+        init {
+            // Speak immediately, before any work starts. Waiting for the first tick would leave a
+            // 20-second hole at the front of every job, and an import that blocks in its opening
+            // read — the caller's descriptor, on storage several sister apps are hammering during a
+            // batch restore — never reaches a tick at all. One broadcast is a small price for the
+            // caller being able to tell "working" from "dead" from the first instant.
+            if (progressAction.isNotEmpty()) {
+                send(UNKNOWN, UNKNOWN, unitCategory, openingText)
             }
         }
 
@@ -124,9 +162,11 @@ object AutomationProgress {
         }
 
         /**
-         * Repeat the last line if the real reporter has genuinely gone quiet. Nothing is repeated
-         * before the export has said something once: an invented number would be worse than silence,
-         * and the export core always reports before the first write that could block.
+         * Repeat the last line if the real reporter has genuinely gone quiet.
+         *
+         * There is always a line to repeat now — the channel opens with one — so this beats for the
+         * whole life of a job rather than only after the first count. The null guard stays as a
+         * guard, not as the silence it used to be.
          */
         private fun beat() {
             val line = lastLine ?: return
@@ -151,6 +191,15 @@ object AutomationProgress {
                     .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
                 if (jobId != null) {
                     intent.putExtra(EXTRA_JOB_ID, jobId)
+                }
+                // The contract's "result" is a LABEL the caller prints BEFORE the counts it formats
+                // itself from current/total/unit — it is not the whole line. Putting our own
+                // "Messages 0/1443" there made 応用管理 render "Messages 0/1443 0/1,443 Messages"
+                // (白い熊, 2026-09-08, and quite right). So it carries words only when there are no
+                // numbers for them to collide with: a beat, where the caller has nothing else to
+                // show and would otherwise print nothing at all.
+                if (current < 0) {
+                    intent.putExtra(EXTRA_REPLY_RESULT, text)
                 }
                 context.sendBroadcast(intent)
             } catch (e: Exception) {

@@ -13,6 +13,7 @@ import android.os.PowerManager
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.File
+import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -135,18 +136,28 @@ class AutomationDataService : Service() {
         ensureBackgroundThread {
             // The job id is the correlation id on this door, sent in both extras so one progress
             // reader on the caller's side serves this door and the receiver's alike.
-            val progress = AutomationProgress.channel(this, progressAction, replyPackage, jobId, jobId)
+            //
+            // Opened INSIDE the try. It used to sit above it, where anything it threw killed this
+            // thread with the reply address in scope and unused — no reply, no `finally`, and a
+            // caller left waiting out its whole timeout. Nothing on the way to a reply may sit
+            // outside the guard.
+            var progress: AutomationProgress.Channel? = null
             try {
+                progress = AutomationProgress.channel(this, progressAction, replyPackage, jobId, jobId)
                 if (importing) {
                     runImport(fd, progress, ::reply)
                 } else {
                     runExport(jobId, fd, items, progress, ::reply)
                 }
-            } catch (e: Exception) {
-                reply("ERROR:${reason(e)}")
+            } catch (t: Throwable) {
+                // Throwable, not Exception. An import holds the whole archive AND the parsed corpus
+                // in memory at once, so OutOfMemoryError is a real outcome here — and an Error is
+                // not an Exception, so it used to slip past this catch and be answered with
+                // silence. Whatever goes wrong, the caller gets a line about it.
+                reply("ERROR:${reason(t)}")
             } finally {
                 // stops the heartbeat before the reply is anyone's concern
-                progress.close()
+                progress?.close()
                 runCatching { fd.close() }
                 stop(startId)
             }
@@ -226,9 +237,7 @@ class AutomationDataService : Service() {
     ) {
         val spool = File(cacheDir, "automation-import-${System.currentTimeMillis()}.zip")
         try {
-            ParcelFileDescriptor.AutoCloseInputStream(fd).use { input ->
-                spool.outputStream().use { input.copyTo(it) }
-            }
+            spoolTo(spool, fd, progress)
             if (spool.length() == 0L) {
                 reply("ERROR:empty archive")
                 return
@@ -236,7 +245,7 @@ class AutomationDataService : Service() {
 
             // Every category we know: import merges per key and skips the ones the archive lacks, so
             // this restores exactly what is in the file and nothing else.
-            val summary = spool.inputStream().use {
+            val outcome = spool.inputStream().use {
                 SettingsEximport.import(
                     context = this,
                     input = it,
@@ -244,18 +253,79 @@ class AutomationDataService : Service() {
                     onProgress = progress.reporter,
                 )
             }
-            val restored = summary.lineSequence().filter { it.isNotBlank() }.toList()
-            if (restored.isEmpty()) {
+            val restored = outcome.summary.lineSequence().filter { it.isNotBlank() }.toList()
+            if (restored.isEmpty() && outcome.refused.isEmpty()) {
                 reply("ERROR:archive carries no categories")
                 return
             }
             Log.i(TAG, "imported: ${restored.joinToString(" · ")}")
+            if (outcome.refused.isNotEmpty()) {
+                // A reserved key, like ERROR:no-foreground-start beside it: the caller can offer
+                // 白い熊 the one action that fixes it instead of printing a sentence at them. The
+                // rest of the archive HAS been applied and re-running is idempotent — the writers
+                // skip what is already there — so this is "come back to it", not "start over".
+                //
+                // The role is logged beside it because the two can disagree: the refusal is decided
+                // by writes that did not land, and a phone that says it holds the role while
+                // dropping every write is a different problem from one that plainly does not hold
+                // it. Whoever reads this log next should not have to guess which they had.
+                val refusal = SettingsEximport.writeRefusal(this)
+                Log.w(TAG, "refused: ${outcome.refused.joinToString(" · ")} — ${refusal.key}")
+                // The whole diagnosis travels in the reply, because that is the one place 白い熊
+                // actually reads it: 応用管理 prints this line verbatim in its operation log. A bare
+                // key sent them to a Settings screen that disagreed with it (2026-09-08).
+                reply("${refusal.key} — ${SettingsEximport.refusalAdvice(this, refusal)}")
+                return
+            }
             // 応用管理 force-stops us straight after this, deliberately and on its side: a running
             // process writes its cached SharedPreferences back out at orderly shutdown and would
             // silently undo the import that just happened.
             reply("OK:${restored.size} categories restored")
         } finally {
             spool.delete()
+        }
+    }
+
+    /**
+     * Copy the caller's archive to [spool], counting the bytes out loud.
+     *
+     * **The phase that used to say nothing, and the one that can block longest.** The bytes come
+     * from a descriptor the caller owns, on storage that during a batch restore several sister apps
+     * are reading and writing at once; nothing downstream reports until the whole archive has been
+     * spooled, unzipped and parsed. So an import used to be silent for its entire first half, and a
+     * caller cannot tell a slow app from a dead one when both say the same nothing.
+     *
+     * The total is `statSize` where the descriptor can answer and [AutomationProgress.UNKNOWN] where
+     * it cannot — a pipe has no length, and an invented total is worse than an honest unknown.
+     */
+    private fun spoolTo(spool: File, fd: ParcelFileDescriptor, progress: AutomationProgress.Channel) {
+        val total = fd.statSize.takeIf { it > 0L } ?: AutomationProgress.UNKNOWN
+        ParcelFileDescriptor.AutoCloseInputStream(fd).use { input ->
+            spool.outputStream().use { out -> copyCounting(input, out, total, progress) }
+        }
+    }
+
+    /** [copyTo] with a running count, because the count is the whole point of doing it by hand. */
+    private fun copyCounting(
+        input: InputStream,
+        out: OutputStream,
+        total: Long,
+        progress: AutomationProgress.Channel,
+    ) {
+        val unit = getString(R.string.state_progress_unit_archive)
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var copied = 0L
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) {
+                break
+            }
+            out.write(buffer, 0, read)
+            copied += read
+            // Throttled inside the channel, so one call per buffer costs nothing. No denominator
+            // when the descriptor would not give us one — "12345" beats "12345/-1".
+            val line = if (total > 0L) "$unit $copied/$total" else "$unit $copied"
+            progress.reporter(copied, total, unit, line)
         }
     }
 

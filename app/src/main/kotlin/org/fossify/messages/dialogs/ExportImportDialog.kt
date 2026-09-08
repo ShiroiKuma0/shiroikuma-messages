@@ -246,7 +246,12 @@ class ExportImportDialog(
     // to the UI thread so thousands of messages don't flood it. [text] is the export core's ready-made
     // counted line ("メッセージ 1234/8942").
     private fun postProgress(labelRes: Int, current: Long, total: Long, text: String) {
-        if (current % PROGRESS_STEP != 0L && current != total) {
+        // A line that carries no count of its own — the counting phase, a heartbeat — is never
+        // throttled. "Every PROGRESS_STEP-th" is meaningless without a count, and the arithmetic
+        // below would drop every one of them, leaving this dialog blank for exactly the phase the
+        // line exists to describe.
+        val counted = current >= 0
+        if (counted && current % PROGRESS_STEP != 0L && current != total) {
             return
         }
         activity.runOnUiThread {
@@ -356,11 +361,11 @@ class ExportImportDialog(
             }
             activity.runOnUiThread {
                 setRunning(null)
-                result.onSuccess { summary ->
-                    if (summary.isEmpty()) {
+                result.onSuccess { outcome ->
+                    if (outcome.summary.isEmpty() && outcome.refused.isEmpty()) {
                         activity.toast(R.string.eim_import_none)
                     } else {
-                        showImportDone(summary)
+                        showImportDone(outcome)
                     }
                 }.onFailure { e ->
                     activity.toast(activity.getString(R.string.eim_import_fail, e.message ?: ""))
@@ -384,10 +389,19 @@ class ExportImportDialog(
         }
     }
 
-    private fun showImportDone(summary: String) {
+    private fun showImportDone(outcome: SettingsEximport.ImportOutcome) {
+        // A refusal is stated above the summary, not buried under it: what did not come back is more
+        // urgent than what did, and the reason is a setting 白い熊 can change and then re-import.
+        val body = if (outcome.refused.isEmpty()) {
+            activity.getString(R.string.eim_import_done_body, outcome.summary)
+        } else {
+            val refusal = SettingsEximport.writeRefusal(activity)
+            SettingsEximport.refusalAdvice(activity, refusal) +
+                "\n\n" + activity.getString(R.string.eim_import_done_body, outcome.summary)
+        }
         val info = AlertDialog.Builder(activity)
             .setTitle(R.string.eim_import_done_title)
-            .setMessage(activity.getString(R.string.eim_import_done_body, summary))
+            .setMessage(body)
             .setPositiveButton(R.string.eim_restart_now, null)
             .setNegativeButton(R.string.eim_restart_later, null)
             .setCancelable(false)
