@@ -4,6 +4,52 @@ This file carries **both** histories. The fork's own releases come first, newest
 from the second `# Changelog` heading downwards is Fossify's original changelog, kept byte-for-byte
 as upstream writes it so that a rebase merges it cleanly instead of conflicting.
 
+## 白い熊 メッセージ 1.9.1+019 — 2026-09-08
+
+Built on **Fossify Messages 1.9.1** · app id `shiroikuma.messeji`, so it installs side-by-side with the official build.
+
+**This release fixes silent data loss on restore.** Anyone restoring this app onto a new or wiped phone should take this build, and should not trust a "success" reported by any earlier one.
+
+## 🚨 Fixed — a restore reported 4,259 messages into an empty phone
+
+Restoring onto a new phone put back every category, reported `OK:7 categories restored` and `Messages (SMS · MMS): 4259`, and left the app opening on **"No stored conversations have been found"**. The backup was perfect; the messages simply never landed.
+
+Android only lets the **default SMS app** write to the message store, and it does not enforce that with an error. It is enforced as a denied `WRITE_SMS` app-op, and a denied app-op makes the Telephony provider **discard the insert and still hand back a Uri** — no exception, no null return. The importer counted attempts rather than writes and threw the insert's result away, so 4,259 no-ops were counted as 4,259 restored messages and reported as a success.
+
+The proof was in the app's own behaviour: two consecutive restores each reported the same `4259`. The writer checks for a duplicate before every insert, so had the first run written anything, the second would have counted far fewer.
+
+- **Every message is read back after it is written**, and only a message the store confirms is counted. `writeMmsMessage` already performed that read-back internally to obtain the row id it needs before writing parts and addresses — it simply never reported it.
+- **A refusal is detected from the writes themselves.** If the store accepts none of the first fifty, the restore stops there rather than spending thousands of round trips proving it. Fifty rather than one, because a single MMS whose addresses yield no usable thread id can legitimately fail on its own merits.
+- **The reply is an error, not an `OK`.** The remaining categories are still applied — they work, and they are useful — but the job comes back as a failure, so a backup tool records the restore as incomplete instead of filing it as done. Re-running once the phone is ready is idempotent: the writer skips anything already present.
+
+This is the caveat [`1.9.1+012`](https://github.com/ShiroiKuma0/shiroikuma-messeji/releases/tag/1.9.1%2B012) documented in its `requires_permissions` note — that granting `READ_SMS` and `WRITE_SMS` is still not sufficient — now actually enforced instead of merely written down.
+
+## 🧭 An error that says what to do, and never contradicts your screen
+
+The first cut of this fix asked `Telephony.Sms.getDefaultSmsPackage()` before writing anything, and refused a phone that was holding the SMS role all along: Android Q moved that role into `RoleManager`, and on EMUI the legacy `Settings.Secure` value the old call reads is still `null` while `dumpsys role` reports the role held. The result was a restore refused with "not the default SMS app" while the Settings screen in front of you named 白い熊 メッセージ as the SMS app.
+
+- **No role API gates anything.** The refusal is decided solely by writes not landing. The role check asks `RoleManager` on Android 10 and later — as the app's own startup path always did — and is used only to *explain* a refusal, never to cause one.
+- **Three states, three instructions**, carried in the reply itself because that is where you actually read it — in the backup tool's operation log, not in a system log you have to go fishing for:
+  - **not the SMS app** — set it in Settings → Apps → Default apps → SMS app, then restore again;
+  - **shown as the SMS app, writes still refused** — the setting was recorded without the permission that goes with it, so pick a *different* app and then pick 白い熊 メッセージ again; re-applying it is what grants the permission;
+  - **everything checks out and it still failed** — restart the phone and try once more.
+- Each one ends by saying that **nothing has been lost and the messages are still in the backup**, because that is the first thing worth knowing.
+- The distinction is drawn from the `WRITE_SMS` app-op, which is what the provider actually consults. If the app cannot read its own app-op it assumes it is allowed — it will never accuse your phone on a guess.
+
+## 📡 Fixed — an import that went silent for its longest phase
+
+An import spools the caller's archive, unzips it and parses the whole corpus before it can count a single message. The heartbeat stayed silent until that first count, so the longest stretch of the longest operation was the one stretch that emitted **nothing at all** — and a backup tool cannot tell a slow app from a dead one when both say the same nothing. On a batch restore, a メッセージ import was heard from zero times and failed as dead after ten minutes.
+
+- **The channel now speaks the moment a job starts** and beats from there, carrying the contract's own "no count yet" value rather than inventing a number.
+- **The spool counts bytes**, so the phase that reads the caller's descriptor — the read that can actually block — reports real progress instead of silence.
+- **Every exit path replies.** The progress channel is built *inside* the guarded block (it used to sit above it, where anything it threw killed the worker with the reply address in scope and unused), and the worker catches `Throwable` rather than `Exception`, so an `OutOfMemoryError` — entirely possible when an import holds the archive and the parsed corpus in memory at once — can no longer exit in silence.
+
+## 🔢 Fixed — counters that read as broken
+
+- **The export's counting phase reported `0/1443`**, a numerator pinned at zero against a climbing denominator, which reads as an export stuck on its first message rather than one still working out how many there are. It now reports "no count yet" and puts the running subtotal in words: 「メッセージを数えています… 2026件」.
+- **Progress lines were rendered twice** — `Messages 0/1443 0/1,443 Messages` — because this app sent its own pre-formatted line under the key the backup tool uses as a *label* to place before the counts it formats itself. The words now travel only on lines that carry no numbers to collide with.
+- **The in-app Export/Import dialog no longer throttles uncounted lines into silence.** Its "show every twentieth" rule is meaningless without a count and used to drop every such line, blanking the panel for exactly the phase the line exists to describe.
+
 ## 白い熊 メッセージ 1.9.1+012 — 2026-09-05
 
 Built on **Fossify Messages 1.9.1** · app id `shiroikuma.messeji`, so it installs side-by-side with the official build.

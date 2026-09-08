@@ -10,7 +10,7 @@ A fork of [Fossify Messages](https://github.com/FossifyOrg/Messages) with **majo
 
 Installs **side-by-side** with Fossify Messages (app id `shiroikuma.messeji`).
 
-**📥 Latest release: [`1.9.1+012`](https://github.com/ShiroiKuma0/shiroikuma-messeji/releases/latest)** — [all releases & APK downloads »](https://github.com/ShiroiKuma0/shiroikuma-messeji/releases)
+**📥 Latest release: [`1.9.1+019`](https://github.com/ShiroiKuma0/shiroikuma-messeji/releases/latest)** — [all releases & APK downloads »](https://github.com/ShiroiKuma0/shiroikuma-messeji/releases)
 
 </div>
 
@@ -47,6 +47,8 @@ The switch now ships **on**, and the authorization token is **optional**: 「認
 A separate **data door** lets 白い熊 応用管理 back this app up *with its data* and put it back on a clean phone — the case no APK backup can cover, because an app's own storage is unreadable without root. It is a `ContentProvider` rather than another broadcast for one decisive reason: **a broadcast cannot tell you who sent it.** Every caller is checked three ways before a byte moves — the **exact package name** (never a prefix, which any sideloaded app could simply claim), the **uid the kernel reports**, and a **pinned signing certificate**. The archive travels through a **file descriptor the caller opened**, so this app never writes into someone else's backup directory and the permission expires the moment that descriptor closes.
 
 **Restoring exists only here** — never as a broadcast. An import overwrites this app's data, and an unauthenticated door to that would let any app on the phone rewrite your message history.
+
+**And the restore cannot lie about what it wrote.** Android only lets the *default SMS app* write to the message store, and it enforces that by quietly discarding every insert while still answering as though it worked — so a restore can report thousands of messages into an empty phone and be believed. Every message is now **read back** after it is written, and only a confirmed one is counted; if the store takes nothing, the restore **stops after fifty** rather than spending thousands of round trips proving it. What comes back is not a code but an instruction: whether the app is not the SMS app yet, or is *shown* as the SMS app while Android still refuses the writes — a real state, and a different fix — with the steps to put it right and the reassurance that the messages are still in the backup.
 
 ---
 
